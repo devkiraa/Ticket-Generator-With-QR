@@ -6,14 +6,27 @@ from PIL import Image
 import os
 
 def generate_ticket_qr(row, template_folder, output_folder):
+    # Skip rows with empty template-id
+    if not row['template-id']:
+        print(f"Template ID is empty for row: {row}")
+        return None, None
+
     # Generate a random alphanumeric ticket number with length 8
     ticket_number = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
     # Generate QR data with NAME, EVENT, and the generated ticket number
     qr_data = f"NAME: {row['NAME']}, EVENT: {row['EVENT']}, Ticket Number: {ticket_number}"
 
+    # Construct template path
+    template_id = row.get('template-id', '')  # Get template ID, default to empty string if not found
+    template_path = os.path.join(template_folder, f"{template_id}.png")
+
+    # Check if template path exists
+    if not os.path.exists(template_path):
+        print(f"Template image not found for row: {row}")
+        return None, None
+
     # Load the template image
-    template_path = os.path.join(template_folder, f"{row['template-id']}.png")
     template_image = Image.open(template_path)
 
     # Generate QR code
@@ -37,13 +50,15 @@ def generate_ticket_qr(row, template_folder, output_folder):
     template_image.paste(qr_image, qr_position)
     
     # Generate output file name
-    ticket_id = f"ticket-{row['ID']}.png"
+    ticket_id = f"SAVISHKAARA#230{row['ID']}.png"
     
     # Save the modified template
     output_path = os.path.join(output_folder, ticket_id)
     template_image.save(output_path)
 
     return ticket_number, ticket_id
+
+
 
 def main():
     template_folder = 'Template'  # Path to your ticket template folder
@@ -62,7 +77,7 @@ def main():
             ticket_number, ticket_id = generate_ticket_qr(row, template_folder, output_folder)
             row['Ticket Number'] = ticket_number  # Add ticket number to the row
             row['Ticket-ID'] = ticket_id  # Add ticket ID (image file name) to the row
-            tickets.append(row)
+            tickets.append(row)  # Append the updated row to the tickets list
 
     # Write tickets data to a new CSV file
     with open('tickets.csv', mode='w', newline='') as file:
@@ -70,6 +85,7 @@ def main():
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(tickets)
+
 
 if __name__ == "__main__":
     main()
