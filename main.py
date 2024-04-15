@@ -36,11 +36,14 @@ def generate_ticket_qr(row, template_folder, output_folder):
     # Paste QR code onto the template
     template_image.paste(qr_image, qr_position)
     
+    # Generate output file name
+    ticket_id = f"ticket-{row['ID']}.png"
+    
     # Save the modified template
-    output_path = os.path.join(output_folder, f"ticket-{row['ID']}.png")
+    output_path = os.path.join(output_folder, ticket_id)
     template_image.save(output_path)
 
-    return ticket_number
+    return ticket_number, ticket_id
 
 def main():
     template_folder = 'Template'  # Path to your ticket template folder
@@ -56,8 +59,9 @@ def main():
         reader = csv.DictReader(file)
         for row in reader:
             # Generate QR code for each row in the CSV
-            ticket_number = generate_ticket_qr(row, template_folder, output_folder)
+            ticket_number, ticket_id = generate_ticket_qr(row, template_folder, output_folder)
             row['Ticket Number'] = ticket_number  # Add ticket number to the row
+            row['Ticket-ID'] = ticket_id  # Add ticket ID (image file name) to the row
             tickets.append(row)
 
     # Write tickets data to a new CSV file
