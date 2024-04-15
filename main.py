@@ -3,15 +3,17 @@ import qrcode
 import random
 import string
 from PIL import Image
+import os
 
-def generate_ticket_qr(row, template_path, output_path):
+def generate_ticket_qr(row, template_folder, output_folder):
     # Generate a random alphanumeric ticket number with length 8
     ticket_number = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
-    # Generate QR data with NAME, ID, and the generated ticket number
-    qr_data = f"NAME: {row['NAME']}, ID: {row['ID']}, Ticket Number: {ticket_number}"
+    # Generate QR data with NAME, EVENT, and the generated ticket number
+    qr_data = f"NAME: {row['NAME']}, EVENT: {row['EVENT']}, Ticket Number: {ticket_number}"
 
     # Load the template image
+    template_path = os.path.join(template_folder, f"{row['template-id']}.png")
     template_image = Image.open(template_path)
 
     # Generate QR code
@@ -35,12 +37,18 @@ def generate_ticket_qr(row, template_path, output_path):
     template_image.paste(qr_image, qr_position)
     
     # Save the modified template
+    output_path = os.path.join(output_folder, f"ticket-{row['ID']}.png")
     template_image.save(output_path)
 
-    return row['NAME'], ticket_number
+    return ticket_number
 
 def main():
-    template_path = 'ticket_template.png'  # Path to your ticket template image
+    template_folder = 'Template'  # Path to your ticket template folder
+    output_folder = 'Qr Generated'  # Path to output folder
+
+    # Create output folder if it doesn't exist
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
 
     # Load data from CSV
     tickets = []
@@ -48,14 +56,15 @@ def main():
         reader = csv.DictReader(file)
         for row in reader:
             # Generate QR code for each row in the CSV
-            output_path = f"Qr Generated/ticket-{row['ID']}.png"
-            name, ticket_number = generate_ticket_qr(row, template_path, output_path)
-            tickets.append([name, ticket_number])
+            ticket_number = generate_ticket_qr(row, template_folder, output_folder)
+            row['Ticket Number'] = ticket_number  # Add ticket number to the row
+            tickets.append(row)
 
     # Write tickets data to a new CSV file
     with open('tickets.csv', mode='w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(['NAME', 'Ticket Number'])
+        fieldnames = list(tickets[0].keys())  # Get field names from the first row
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
         writer.writerows(tickets)
 
 if __name__ == "__main__":
