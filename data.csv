@@ -1,5 +1,5 @@
-NAME,ID,EVENT,template-id,ROLL-NO
-John Doe,1,Conference,comingnow,KH.EN.U3CDS22042
-Alice Smith,2,Workshop,2,KH.EN.U3CDS22043
-Bob Johnson,3,Seminar,1,KH.EN.U3CDS22044
-Emma Brown,4,Exhibition,2,KH.EN.U3CDS22045
+NAME,ID,EVENT,template-id,ROLL-NO,EMAIL
+John Doe,1,Conference,22,KH.EN.U3CDS22042,kirankichu6151@gmail.com
+Alice Smith,2,Workshop,22,KH.EN.U3CDS22043,kirankichu6151@gmail.com
+Bob Johnson,3,Seminar,22,KH.EN.U3CDS22044,kirankichu6151@gmail.com
+Emma Brown,4,Exhibition,22,KH.EN.U3CDS22045,kirankichu6151@gmail.com

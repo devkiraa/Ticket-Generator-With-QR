@@ -44,7 +44,7 @@ def generate_ticket_qr(row, template_folder, output_folder):
     qr_image = qr_image.resize((150, 150))
     
     # Calculate position to paste QR code (bottom right corner)
-    qr_position = (template_image.width - qr_image.width - 50, template_image.height - qr_image.height - 50)
+    qr_position = (template_image.width - qr_image.width - 50, template_image.height - qr_image.height - 120)
     
     # Paste QR code onto the template
     template_image.paste(qr_image, qr_position)
