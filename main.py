@@ -4,6 +4,7 @@ import random
 import string
 from PIL import Image
 import os
+from tqdm import tqdm  # Import tqdm for progress tracking
 
 def generate_ticket_qr(row, template_folder, output_folder):
     # Skip rows with empty template-id
@@ -49,15 +50,14 @@ def generate_ticket_qr(row, template_folder, output_folder):
     # Paste QR code onto the template
     template_image.paste(qr_image, qr_position)
     
-    # Generate output file name
-    ticket_id = f"SAVISHKAARA#230{row['ID']}.png"
+    # Generate output file name with a unique identifier
+    ticket_id = f"SAVISHKAARA#230{row['ID']}_{ticket_number}.png"
     
     # Save the modified template
     output_path = os.path.join(output_folder, ticket_id)
     template_image.save(output_path)
 
     return ticket_number, ticket_id
-
 
 
 def main():
@@ -72,7 +72,13 @@ def main():
     tickets = []
     with open('data.csv', mode='r') as file:
         reader = csv.DictReader(file)
-        for row in reader:
+        rows = list(reader)
+        if not rows:
+            print("No data found in the CSV file.")
+            return  # Exit the function if there are no rows in the CSV file
+        
+        # Use tqdm for progress tracking
+        for row in tqdm(rows, desc="Generating Tickets", total=len(rows)):
             # Generate QR code for each row in the CSV
             ticket_number, ticket_id = generate_ticket_qr(row, template_folder, output_folder)
             row['Ticket Number'] = ticket_number  # Add ticket number to the row
@@ -81,10 +87,13 @@ def main():
 
     # Write tickets data to a new CSV file
     with open('tickets.csv', mode='w', newline='') as file:
-        fieldnames = list(tickets[0].keys())  # Get field names from the first row
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(tickets)
+        if tickets:  # Check if there are any tickets before writing to the CSV file
+            fieldnames = list(tickets[0].keys())  # Get field names from the first row
+            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(tickets)
+        else:
+            print("No tickets generated.")
 
 
 if __name__ == "__main__":
