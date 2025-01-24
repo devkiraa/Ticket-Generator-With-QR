@@ -7,7 +7,22 @@ import os
 import time
 import csv
 from tqdm import tqdm
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+from dotenv import load_dotenv
+from datetime import datetime
 
+# Load environment variables
+load_dotenv()
+
+# Email credentials
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
 def normalize_columns(row):
     """
@@ -26,9 +41,32 @@ def normalize_columns(row):
 
     return normalized_row
 
+def load_ticket_keys(key_file):
+    """Load existing ticket keys from a CSV file."""
+    ticket_keys = set()
+    if os.path.exists(key_file):
+        with open(key_file, mode="r") as file:
+            reader = csv.reader(file)
+            for row in reader:
+                ticket_keys.add(row[0])
+    return ticket_keys
 
-def generate_ticket_qr(row, template_id, template_folder, output_folder):
-    ticket_number = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+def save_ticket_key(key_file, ticket_number):
+    """Save a new ticket key to the CSV file with a timestamp."""
+    with open(key_file, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        writer.writerow([ticket_number, timestamp])
+
+def generate_unique_ticket_number(existing_keys):
+    """Generate a unique ticket number."""
+    while True:
+        ticket_number = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+        if ticket_number not in existing_keys:
+            return ticket_number
+
+def generate_ticket_qr(row, template_id, template_folder, output_folder, existing_keys, key_file):
+    ticket_number = generate_unique_ticket_number(existing_keys)
     qr_data = f"NAME: {row['Name']}, ROLL-NO: {row['Roll-No']}, EMAIL: {row['EMAIL']}, Ticket Number: {ticket_number}"
     template_path = os.path.join(template_folder, f"{template_id}.png")
 
@@ -53,45 +91,90 @@ def generate_ticket_qr(row, template_id, template_folder, output_folder):
     output_path = os.path.join(output_folder, ticket_id)
     template_image.save(output_path)
 
-    return ticket_number, ticket_id
+    save_ticket_key(key_file, ticket_number)
+    return ticket_number, output_path
 
+def send_email_with_attachment(subject, recipient, body, attachment_path):
+    """Send an email with an attachment."""
+    try:
+        # Setup the MIME
+        message = MIMEMultipart()
+        message['From'] = EMAIL_USER
+        message['To'] = recipient
+        message['Subject'] = subject
 
-def process_sheet(sheet_url, template_id, processed_ids, output_sheet, template_folder, output_folder):
-    # Access the sheet
+        # Attach the body with the msg instance
+        message.attach(MIMEText(body, 'plain'))
+
+        # Open the file to be sent
+        with open(attachment_path, "rb") as attachment:
+            mime_base = MIMEBase('application', 'octet-stream')
+            mime_base.set_payload(attachment.read())
+            encoders.encode_base64(mime_base)
+            mime_base.add_header('Content-Disposition', f'attachment; filename={os.path.basename(attachment_path)}')
+            message.attach(mime_base)
+
+        # Connect to the server and send the email
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_USER, EMAIL_PASSWORD)
+            server.send_message(message)
+
+        print(f"Email sent to {recipient} with attachment {attachment_path}")
+
+    except Exception as e:
+        print(f"Failed to send email to {recipient}: {e}")
+
+def is_valid_row(row):
+    """Check if all columns in the row have values."""
+    return all(value.strip() for value in row.values())
+
+def process_sheet(sheet_url, template_id, processed_ids, output_sheet, template_folder, output_folder, existing_keys, key_file):
     gc = gspread.service_account(filename="service_account.json")
     sheet = gc.open_by_url(sheet_url).sheet1
 
-    # Retrieve rows
     rows = sheet.get_all_records()
-    print(f"Retrieved {len(rows)} rows from {sheet_url}.")
     if not rows:
-        print("No data found in the Google Sheet.")
         return
 
-    for row in tqdm(rows, desc=f"Processing Sheet {sheet_url}"):
-        row = normalize_columns(row)  # Normalize the columns
+    new_tickets_generated = 0
 
-        # Check if required columns exist
-        if 'Name' not in row or 'Roll-No' not in row or 'EMAIL' not in row:
-            print(f"Required columns missing in sheet: {sheet_url}")
+    for row in rows:
+        row = normalize_columns(row)
+        if not is_valid_row(row):
+            print(f"Skipping row with missing values: {row}")
             continue
 
-        # Skip if already processed
-        unique_key = f"{row['Name']}_{row['Roll-No']}_{row['EMAIL']}"
+        if 'Name' not in row or 'Roll-No' not in row or 'EMAIL' not in row:
+            print(f"Skipping invalid row: {row}")
+            continue
+
+        unique_key = f"{template_id}_{row['Name']}_{row['Roll-No']}_{row['EMAIL']}"
         if unique_key in processed_ids:
             continue
 
-        ticket_number, ticket_id = generate_ticket_qr(row, template_id, template_folder, output_folder)
-        if ticket_number and ticket_id:
-            # Add to the processed IDs and log into the output sheet
+        ticket_number, ticket_path = generate_ticket_qr(row, template_id, template_folder, output_folder, existing_keys, key_file)
+        if ticket_number and ticket_path:
             processed_ids.add(unique_key)
-            output_sheet.append_row([row['Name'], row['Roll-No'], row['EMAIL'], ticket_number, ticket_id])
-            print(f"Ticket generated: {ticket_id}")
+            existing_keys.add(ticket_number)
+            output_sheet.append_row([row['Name'], row['Roll-No'], row['EMAIL'], ticket_number, os.path.basename(ticket_path)])
+            send_email_with_attachment(
+                f"Your {template_id} Event Ticket",
+                row['EMAIL'],
+                f"Dear {row['Name']},\n\nPlease find your ticket attached.\n\nThank you for registering!",
+                ticket_path
+            )
+            new_tickets_generated += 1
 
+    if new_tickets_generated > 0:
+        print(f"Generated {new_tickets_generated} new tickets for template ID: {template_id}")
+    else:
+        print(f"No new rows to process for template ID: {template_id}.")
 
 def main():
     # CSV containing template IDs and sheet URLs
     config_csv = "sheets_config.csv"
+    key_file = "ticket_keys.csv"
 
     # Paths
     template_folder = "Template"
@@ -103,8 +186,9 @@ def main():
     gc = gspread.service_account(filename="service_account.json")
     output_sheet = gc.open("Processed Tickets").sheet1
 
-    # Initialize processed IDs
+    # Initialize processed IDs and load existing ticket keys
     processed_ids = set()
+    existing_keys = load_ticket_keys(key_file)
 
     # Read sheet configurations
     print("Loading sheet configurations...")
@@ -112,7 +196,7 @@ def main():
         reader = csv.DictReader(file)
         sheet_configs = list(reader)
 
-    print("Monitoring multiple Google Sheets for new data...")
+    print("Monitoring multiple templates for new data...")
     while True:
         try:
             for config in sheet_configs:
@@ -122,13 +206,12 @@ def main():
                     print(f"Invalid configuration: {config}")
                     continue
 
-                process_sheet(sheet_url, template_id, processed_ids, output_sheet, template_folder, output_folder)
+                process_sheet(sheet_url, template_id, processed_ids, output_sheet, template_folder, output_folder, existing_keys, key_file)
 
-            time.sleep(10)  # Wait 30 seconds before checking again
+            time.sleep(max(10, 30 / len(sheet_configs)))  # Adjust wait time based on the number of templates
         except Exception as e:
             print(f"Error: {e}")
             time.sleep(10)  # Retry after a short delay
-
 
 if __name__ == "__main__":
     main()
