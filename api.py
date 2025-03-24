@@ -3,6 +3,7 @@ import csv
 import random
 import string
 import time
+import json
 import requests
 from datetime import datetime
 from io import BytesIO
@@ -20,11 +21,11 @@ from email import encoders
 # Load environment variables
 load_dotenv()
 
-# Email credentials (if you want to send the ticket by email as well)
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+# Default email credentials (fallback if not provided in request payload)
+DEFAULT_SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+DEFAULT_SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+DEFAULT_EMAIL_USER = os.getenv("EMAIL_USER")
+DEFAULT_EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
 # Configure directories
 OUTPUT_FOLDER = "Qr_Generated"
@@ -34,7 +35,6 @@ if not os.path.exists(OUTPUT_FOLDER):
 # CSV file for persisting ticket keys (to avoid duplicates)
 KEY_FILE = "ticket_keys.csv"
 
-
 # ---------------- Utility Functions ---------------- #
 
 def generate_unique_ticket_number(existing_keys):
@@ -43,7 +43,6 @@ def generate_unique_ticket_number(existing_keys):
         ticket_number = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
         if ticket_number not in existing_keys:
             return ticket_number
-
 
 def load_ticket_keys(key_file):
     """Load existing ticket keys from a CSV file."""
@@ -56,14 +55,12 @@ def load_ticket_keys(key_file):
                     ticket_keys.add(row[0])
     return ticket_keys
 
-
 def save_ticket_key(key_file, ticket_number):
     """Save a new ticket key to the CSV file with a timestamp."""
     with open(key_file, mode="a", newline="") as file:
         writer = csv.writer(file)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         writer.writerow([ticket_number, timestamp])
-
 
 def download_template_image(url):
     """Download an image from a given URL and return a PIL Image object."""
@@ -76,18 +73,24 @@ def download_template_image(url):
         print(f"Error downloading image: {e}")
         return None
 
-
-def send_email_with_attachment(subject, recipient, body, attachment_path):
-    """Send an email with an attachment and return a status message."""
+def send_email_with_attachment(subject, recipient, body, attachment_path, sender_name,
+                               email_format="plain", smtp_server=DEFAULT_SMTP_SERVER,
+                               smtp_port=DEFAULT_SMTP_PORT, email_user=DEFAULT_EMAIL_USER,
+                               email_password=DEFAULT_EMAIL_PASSWORD):
+    """
+    Send an email with an attachment.
+    email_format: "plain" for text or "html" for HTML content.
+    The sender name is included in the From header (e.g., "Admin <email@domain.com>").
+    """
     try:
-        # Setup the MIME
         message = MIMEMultipart()
-        message['From'] = EMAIL_USER
+        # Construct the From header with sender name and email address.
+        message['From'] = f"{sender_name} <{email_user}>"
         message['To'] = recipient
         message['Subject'] = subject
 
-        # Attach the body with the msg instance
-        message.attach(MIMEText(body, 'plain'))
+        # Attach body (plain text or HTML)
+        message.attach(MIMEText(body, email_format))
 
         # Open the file to be sent
         with open(attachment_path, "rb") as attachment:
@@ -97,10 +100,10 @@ def send_email_with_attachment(subject, recipient, body, attachment_path):
             mime_base.add_header('Content-Disposition', f'attachment; filename={os.path.basename(attachment_path)}')
             message.attach(mime_base)
 
-        # Connect to the server and send the email
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        # Connect and send email
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
-            server.login(EMAIL_USER, EMAIL_PASSWORD)
+            server.login(email_user, email_password)
             server.send_message(message)
 
         status = f"Email sent to {recipient} with attachment {attachment_path}"
@@ -112,14 +115,7 @@ def send_email_with_attachment(subject, recipient, body, attachment_path):
         print(error_msg)
         return error_msg
 
-
-def generate_ticket_qr(
-    template_image,
-    image_size=None,
-    qr_config=None,
-    ticket_details=None,
-    existing_keys=None
-):
+def generate_ticket_qr(template_image, image_size=None, qr_config=None, ticket_details=None, existing_keys=None):
     """
     Generate a ticket with a QR code overlaid.
 
@@ -127,7 +123,7 @@ def generate_ticket_qr(
     - template_image: A PIL Image object (loaded template image).
     - image_size: dict with "width" and "height" to optionally resize template image.
     - qr_config: dict with keys:
-         "size": int (size of qr code in pixels),
+         "size": int (size of QR code in pixels),
          "offset": dict with "x" and "y" (offset from bottom-right),
          "rotation": int (degrees to rotate the QR code).
     - ticket_details: dict with all details to be added to the QR data.
@@ -140,17 +136,14 @@ def generate_ticket_qr(
     if image_size and "width" in image_size and "height" in image_size:
         template_image = template_image.resize((image_size["width"], image_size["height"]))
 
-    # Generate a unique ticket number and add it to ticket details
+    # Generate a unique ticket number and add it to ticket_details
     ticket_number = generate_unique_ticket_number(existing_keys)
     if ticket_details is None:
         ticket_details = {}
-    ticket_details["Ticket Number"] = ticket_number
+    ticket_details["ticket_number"] = ticket_number
 
-    # Build structured multiline QR data from ticket details
-    qr_data_lines = []
-    for key, value in ticket_details.items():
-        qr_data_lines.append(f"{key.upper()}: {value}")
-    qr_data = "\n".join(qr_data_lines)
+    # Build a multi-line string for QR code data using uppercase keys
+    qr_data_str = "\n".join(f"{key.upper()}: {value}" for key, value in ticket_details.items())
 
     # Set default QR config if not provided
     default_qr_config = {"size": 150, "offset": {"x": 50, "y": 120}, "rotation": 0}
@@ -168,7 +161,7 @@ def generate_ticket_qr(
         box_size=10,
         border=4,
     )
-    qr.add_data(qr_data)
+    qr.add_data(qr_data_str)
     qr.make(fit=True)
     qr_image = qr.make_image(fill_color="black", back_color="white").convert('RGB')
     qr_image = qr_image.resize((qr_size, qr_size))
@@ -188,7 +181,7 @@ def generate_ticket_qr(
     
     # Build the ticket file name and save the image
     event_name = ticket_details.get("event", "EVENT")
-    roll_no = ticket_details.get("Roll-No", "UNKNOWN")
+    roll_no = ticket_details.get("roll_no", "UNKNOWN")
     ticket_filename = f"{event_name}_{roll_no}_{ticket_number}.png"
     output_path = os.path.join(OUTPUT_FOLDER, ticket_filename)
     template_image.save(output_path)
@@ -196,8 +189,10 @@ def generate_ticket_qr(
     # Save the ticket key for future uniqueness tracking
     save_ticket_key(KEY_FILE, ticket_number)
     
-    return ticket_number, output_path, qr_data
-
+    # Also return the ticket details as a dict with lowercase keys for API response.
+    qr_data_dict = {key.lower(): value for key, value in ticket_details.items()}
+    
+    return ticket_number, output_path, qr_data_dict
 
 # ---------------- Flask API Application ---------------- #
 
@@ -208,7 +203,6 @@ app = Flask(__name__)
 def serve_generated_ticket(filename):
     return send_from_directory(OUTPUT_FOLDER, filename)
 
-
 @app.route('/generate_ticket', methods=['POST'])
 def generate_ticket():
     """
@@ -216,37 +210,41 @@ def generate_ticket():
 
     Expected JSON payload example:
     {
-        "email": "kirankichu6151@gmail.com",
-        "name": "John Doe",
-        "roll_no": "12345",
-        "use_image_url": true,                     // if false, use image path (default)
-        "template_image_url": "https://example.com/template.png", // required if use_image_url is true
-        "template_image_path": "Template/mytemplate.png",         // required if use_image_url is false
-        "image_size": {"width": 800, "height": 600},              // Optional
-        "qr_config": {
-            "size": 150,
-            "offset": {"x": 50, "y": 120},
-            "rotation": 0
-        },
-        "ticket_details": {
-            "event": "SAVISHKAARA2K25",
-            "extra": "Additional info if needed"
-        },
-        "send_email": false  // Optional flag to trigger email sending
+      "email": "kirankichu6151@gmail.com",
+      "use_image_url": true,
+      "template_image_url": "https://www.eventim.sk/obj/media/AT-eventim/teaser/artworks/2024/twenty-one-pilots-2024-tickets-header.jpg",
+      "image_size": {"width": 1240, "height": 480},
+      "qr_config": {
+        "size": 150,
+        "offset": {"x": 1000, "y": 190},
+        "rotation": 0
+      },
+      "ticket_details": {
+         "name": "Kiran S",
+         "roll_no": "KH.EN.U3CDS22042",
+         "event": "SAVISHKAARA2K25",
+         "extra": "Additional info if needed"
+      },
+      "mail_credentials": {
+         "email_user": "mail.aeims@gmail.com",
+         "email_password": "hbpduroqycmyzxld",
+         "sender_name": "Admin"   // New field for sender name
+      },
+      "send_email": true,
+      "email_subject": "Your Ticket for SAVISHKAARA2K25",
+      "email_body": "<p>Dear John Doe,<br>Please find your ticket attached.<br>Enjoy the event!</p><div style=\"font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; background-color: #f8f8f8; border-radius: 10px; text-align: center;\"><h2 style=\"color: #fc8019; margin-bottom: 10px;\">Hey John Doe! 🎉</h2><p style=\"color: #333; font-size: 16px;\">Your ticket is ready! We've attached it to this email, so you're all set for an amazing experience.</p><p style=\"color: #666; font-size: 14px;\">Event: <strong>Your Event Name</strong> <br>Date & Time: <strong>DD/MM/YYYY, HH:MM AM/PM</strong> <br>Venue: <strong>Event Location</strong></p><p style=\"color: #333; font-size: 16px;\">Save your ticket, show it at the entry, and get ready for a fantastic time!</p><p style=\"font-size: 14px; color: #666;\">Need any help? We’ve got your back! <br>Reach out to our support team anytime.</p><a href=\"https://your-support-link.com\" style=\"display: inline-block; padding: 10px 20px; background-color: #fc8019; color: #fff; text-decoration: none; border-radius: 5px; font-size: 14px; margin-top: 10px;\">Contact Support</a><p style=\"font-size: 12px; color: #999; margin-top: 20px;\">Powered by <strong>Your Company Name</strong> 🚀</p></div>",
+      "email_format": "html"
     }
     """
     data = request.get_json()
-    # Required field: email is needed.
-    required_fields = ["email", "name", "roll_no"]
-    missing_fields = [field for field in required_fields if field not in data or not data[field].strip()]
-    if missing_fields:
-        return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
+
+    # Only email is now required at the top level.
+    if "email" not in data or not data["email"].strip():
+        return jsonify({"error": "Missing required field: email"}), 400
 
     email = data["email"].strip()
-    name = data["name"].strip()
-    roll_no = data["roll_no"].strip()
 
-    # Decide whether to use image URL or local image path (default is local image path)
+    # Determine which template image to use
     use_image_url = data.get("use_image_url", False)
     template_image = None
     if use_image_url:
@@ -266,18 +264,14 @@ def generate_ticket():
     image_size = data.get("image_size")  # Optional dictionary with width and height
     qr_config = data.get("qr_config")    # Optional dict for QR code configuration
 
-    # Merge provided ticket_details with dynamic fields
+    # Get ticket_details from the request payload.
     ticket_details = data.get("ticket_details", {})
-    # Add dynamic values into ticket_details (avoid duplication in QR data)
-    ticket_details.setdefault("Name", name)
-    ticket_details.setdefault("Roll-No", roll_no)
-    ticket_details.setdefault("Email", email)
 
     # Load existing ticket keys to avoid duplicates
     existing_keys = load_ticket_keys(KEY_FILE)
 
-    # Generate ticket with QR code overlay
-    ticket_number, output_path, qr_data = generate_ticket_qr(
+    # Generate ticket with QR code overlay and obtain the updated ticket details as a dict.
+    ticket_number, output_path, qr_data_dict = generate_ticket_qr(
         template_image,
         image_size=image_size,
         qr_config=qr_config,
@@ -285,36 +279,43 @@ def generate_ticket():
         existing_keys=existing_keys
     )
 
-    # Optionally send the ticket via email if requested and credentials are provided
+    # Retrieve mail credentials from the request payload (if provided)
+    mail_credentials = data.get("mail_credentials", {})
+    email_user_cred = mail_credentials.get("email_user", DEFAULT_EMAIL_USER)
+    email_password = mail_credentials.get("email_password", DEFAULT_EMAIL_PASSWORD)
+    sender_name = mail_credentials.get("sender_name", "Admin")  # New sender name field
+
+    # Optionally send the ticket via email if requested and credentials are available
     email_status = "Not sent"
-    if data.get("send_email", False) and EMAIL_USER and EMAIL_PASSWORD:
-        subject = f"Your {ticket_details.get('event', 'Event')} Ticket"
-        body = f"Dear {name},\n\nPlease find your ticket attached.\n\nTicket Details:\n{qr_data}\n\nThank you for registering!"
-        email_status = send_email_with_attachment(subject, email, body, output_path)
+    if data.get("send_email", False) and email_user_cred and email_password:
+        # Email subject and body are taken directly from the request.
+        email_subject = data.get("email_subject")
+        email_body = data.get("email_body")
+        email_format = data.get("email_format", "plain")
+        email_status = send_email_with_attachment(
+            email_subject,
+            email,
+            email_body,
+            output_path,
+            sender_name,
+            email_format=email_format,
+            smtp_server=DEFAULT_SMTP_SERVER,
+            smtp_port=DEFAULT_SMTP_PORT,
+            email_user=email_user_cred,
+            email_password=email_password
+        )
 
     # Construct a URL for the generated ticket (assuming the API is hosted appropriately)
     ticket_url = url_for('serve_generated_ticket', filename=os.path.basename(output_path), _external=True)
 
     response = {
         "email": email,
-        "name": name,
-        "roll_no": roll_no,
+        "email_status": email_status,
+        "qr_data": qr_data_dict,
         "ticket_number": ticket_number,
-        "ticket_url": ticket_url,
-        "qr_data": qr_data,
-        "email_status": email_status
+        "ticket_url": ticket_url
     }
     return jsonify(response), 200
-
-
-# ---------------- Suggestions for Future Improvements ---------------- #
-# 1. Add proper logging (e.g., using Python's logging module) for debugging and auditing.
-# 2. Use request validation libraries (such as Marshmallow or pydantic) to validate and sanitize input data.
-# 3. Consider hosting the generated images in cloud storage (e.g., AWS S3) for scalability.
-# 4. Implement authentication and rate limiting for the API endpoints.
-# 5. Refactor the code into separate modules (e.g., api.py, utils.py, config.py) for better maintainability.
-# 6. Add unit tests to ensure the ticket generation functionality works as expected.
-# 7. Use asynchronous request handling if expecting a high load (e.g., with FastAPI or using Flask’s async support).
 
 # ---------------- Run the Flask App ---------------- #
 if __name__ == "__main__":
