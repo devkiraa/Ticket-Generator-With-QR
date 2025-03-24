@@ -78,7 +78,7 @@ def download_template_image(url):
 
 
 def send_email_with_attachment(subject, recipient, body, attachment_path):
-    """Send an email with an attachment."""
+    """Send an email with an attachment and return a status message."""
     try:
         # Setup the MIME
         message = MIMEMultipart()
@@ -103,15 +103,18 @@ def send_email_with_attachment(subject, recipient, body, attachment_path):
             server.login(EMAIL_USER, EMAIL_PASSWORD)
             server.send_message(message)
 
-        print(f"Email sent to {recipient} with attachment {attachment_path}")
+        status = f"Email sent to {recipient} with attachment {attachment_path}"
+        print(status)
+        return status
 
     except Exception as e:
-        print(f"Failed to send email to {recipient}: {e}")
+        error_msg = f"Failed to send email to {recipient}: {e}"
+        print(error_msg)
+        return error_msg
 
 
 def generate_ticket_qr(
-    name, roll_no, email,
-    template_image, 
+    template_image,
     image_size=None,
     qr_config=None,
     ticket_details=None,
@@ -119,16 +122,15 @@ def generate_ticket_qr(
 ):
     """
     Generate a ticket with a QR code overlaid.
-    
+
     Parameters:
-    - name, roll_no, email: Ticket owner details.
     - template_image: A PIL Image object (loaded template image).
     - image_size: dict with "width" and "height" to optionally resize template image.
     - qr_config: dict with keys:
          "size": int (size of qr code in pixels),
          "offset": dict with "x" and "y" (offset from bottom-right),
          "rotation": int (degrees to rotate the QR code).
-    - ticket_details: dict with extra details to be added to the QR data.
+    - ticket_details: dict with all details to be added to the QR data.
     - existing_keys: set of already generated ticket keys to ensure uniqueness.
     """
     if existing_keys is None:
@@ -138,13 +140,18 @@ def generate_ticket_qr(
     if image_size and "width" in image_size and "height" in image_size:
         template_image = template_image.resize((image_size["width"], image_size["height"]))
 
-    # Generate a unique ticket number
+    # Generate a unique ticket number and add it to ticket details
     ticket_number = generate_unique_ticket_number(existing_keys)
-    
-    # Construct QR data. You can add additional details as needed.
-    extra_info = " | ".join(f"{k.upper()}: {v}" for k, v in ticket_details.items()) if ticket_details else ""
-    qr_data = f"NAME: {name}, ROLL-NO: {roll_no}, EMAIL: {email}, Ticket Number: {ticket_number} {extra_info}"
-    
+    if ticket_details is None:
+        ticket_details = {}
+    ticket_details["Ticket Number"] = ticket_number
+
+    # Build structured multiline QR data from ticket details
+    qr_data_lines = []
+    for key, value in ticket_details.items():
+        qr_data_lines.append(f"{key.upper()}: {value}")
+    qr_data = "\n".join(qr_data_lines)
+
     # Set default QR config if not provided
     default_qr_config = {"size": 150, "offset": {"x": 50, "y": 120}, "rotation": 0}
     if qr_config:
@@ -180,7 +187,9 @@ def generate_ticket_qr(
     template_image.paste(qr_image, position)
     
     # Build the ticket file name and save the image
-    ticket_filename = f"{ticket_details.get('event', 'EVENT')}_{roll_no}_{ticket_number}.png" if ticket_details else f"TICKET_{roll_no}_{ticket_number}.png"
+    event_name = ticket_details.get("event", "EVENT")
+    roll_no = ticket_details.get("Roll-No", "UNKNOWN")
+    ticket_filename = f"{event_name}_{roll_no}_{ticket_number}.png"
     output_path = os.path.join(OUTPUT_FOLDER, ticket_filename)
     template_image.save(output_path)
     
@@ -204,15 +213,16 @@ def serve_generated_ticket(filename):
 def generate_ticket():
     """
     API endpoint to generate a ticket.
-    
+
     Expected JSON payload example:
     {
+        "email": "kirankichu6151@gmail.com",
         "name": "John Doe",
         "roll_no": "12345",
-        "email": "john@example.com",
-        "template_image_url": "https://example.com/template.png",
-        "template_image_path": "Template/mytemplate.png",  // Optional if not using URL
-        "image_size": {"width": 800, "height": 600},          // Optional
+        "use_image_url": true,                     // if false, use image path (default)
+        "template_image_url": "https://example.com/template.png", // required if use_image_url is true
+        "template_image_path": "Template/mytemplate.png",         // required if use_image_url is false
+        "image_size": {"width": 800, "height": 600},              // Optional
         "qr_config": {
             "size": 150,
             "offset": {"x": 50, "y": 120},
@@ -226,39 +236,48 @@ def generate_ticket():
     }
     """
     data = request.get_json()
-    required_fields = ["name", "roll_no", "email"]
+    # Required field: email is needed.
+    required_fields = ["email", "name", "roll_no"]
     missing_fields = [field for field in required_fields if field not in data or not data[field].strip()]
     if missing_fields:
         return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
 
+    email = data["email"].strip()
     name = data["name"].strip()
     roll_no = data["roll_no"].strip()
-    email = data["email"].strip()
 
-    # Load template image: first try URL then fallback to local path.
+    # Decide whether to use image URL or local image path (default is local image path)
+    use_image_url = data.get("use_image_url", False)
     template_image = None
-    if "template_image_url" in data and data["template_image_url"]:
+    if use_image_url:
+        if "template_image_url" not in data or not data["template_image_url"]:
+            return jsonify({"error": "template_image_url must be provided when use_image_url is true"}), 400
         template_image = download_template_image(data["template_image_url"])
         if template_image is None:
             return jsonify({"error": "Failed to download template image from URL"}), 400
-    elif "template_image_path" in data and data["template_image_path"]:
+    else:
+        if "template_image_path" not in data or not data["template_image_path"]:
+            return jsonify({"error": "template_image_path must be provided when use_image_url is false"}), 400
         template_path = data["template_image_path"]
         if not os.path.exists(template_path):
             return jsonify({"error": f"Template image not found at {template_path}"}), 400
         template_image = Image.open(template_path)
-    else:
-        return jsonify({"error": "No template image provided"}), 400
 
-    image_size = data.get("image_size")  # optional dictionary with width and height
-    qr_config = data.get("qr_config")    # optional dict for QR code configuration
+    image_size = data.get("image_size")  # Optional dictionary with width and height
+    qr_config = data.get("qr_config")    # Optional dict for QR code configuration
+
+    # Merge provided ticket_details with dynamic fields
     ticket_details = data.get("ticket_details", {})
+    # Add dynamic values into ticket_details (avoid duplication in QR data)
+    ticket_details.setdefault("Name", name)
+    ticket_details.setdefault("Roll-No", roll_no)
+    ticket_details.setdefault("Email", email)
 
     # Load existing ticket keys to avoid duplicates
     existing_keys = load_ticket_keys(KEY_FILE)
 
     # Generate ticket with QR code overlay
     ticket_number, output_path, qr_data = generate_ticket_qr(
-        name, roll_no, email,
         template_image,
         image_size=image_size,
         qr_config=qr_config,
@@ -267,25 +286,23 @@ def generate_ticket():
     )
 
     # Optionally send the ticket via email if requested and credentials are provided
+    email_status = "Not sent"
     if data.get("send_email", False) and EMAIL_USER and EMAIL_PASSWORD:
         subject = f"Your {ticket_details.get('event', 'Event')} Ticket"
         body = f"Dear {name},\n\nPlease find your ticket attached.\n\nTicket Details:\n{qr_data}\n\nThank you for registering!"
-        try:
-            send_email_with_attachment(subject, email, body, output_path)
-        except Exception as e:
-            # Log error but continue to return response
-            print(f"Error sending email: {e}")
+        email_status = send_email_with_attachment(subject, email, body, output_path)
 
     # Construct a URL for the generated ticket (assuming the API is hosted appropriately)
     ticket_url = url_for('serve_generated_ticket', filename=os.path.basename(output_path), _external=True)
 
     response = {
-        "ticket_number": ticket_number,
+        "email": email,
         "name": name,
         "roll_no": roll_no,
-        "email": email,
+        "ticket_number": ticket_number,
         "ticket_url": ticket_url,
-        "qr_data": qr_data
+        "qr_data": qr_data,
+        "email_status": email_status
     }
     return jsonify(response), 200
 
