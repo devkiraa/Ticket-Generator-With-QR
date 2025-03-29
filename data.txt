@@ -1,0 +1,8 @@
+email=savishkaara.amrita@gmail.com
+apppassword=kfbrayafnnqhilsz
+
+EMAIL_USER='mail.aeims@gmail.com'
+EMAIL_PASSWORD='hbpduroqycmyzxld'
+EMAIL_FROM_NAME='AEIMS'
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
