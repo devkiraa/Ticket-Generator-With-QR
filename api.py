@@ -32,6 +32,11 @@ OUTPUT_FOLDER = "Qr_Generated"
 if not os.path.exists(OUTPUT_FOLDER):
     os.makedirs(OUTPUT_FOLDER)
 
+# Folder for local templates
+TEMPLATES_FOLDER = "templates"
+if not os.path.exists(TEMPLATES_FOLDER):
+    os.makedirs(TEMPLATES_FOLDER)
+
 # CSV file for persisting ticket keys (to avoid duplicates)
 KEY_FILE = "ticket_keys.csv"
 
@@ -281,9 +286,11 @@ def generate_ticket():
         if template_image is None:
             return jsonify({"error": "Failed to download template image from URL"}), 400
     else:
+        # If not using image URL, use a local template image from the TEMPLATES_FOLDER.
         if "template_image_path" not in data or not data["template_image_path"]:
             return jsonify({"error": "template_image_path must be provided when use_image_url is false"}), 400
-        template_path = data["template_image_path"]
+        template_filename = data["template_image_path"]
+        template_path = os.path.join(TEMPLATES_FOLDER, template_filename)
         if not os.path.exists(template_path):
             return jsonify({"error": f"Template image not found at {template_path}"}), 400
         template_image = Image.open(template_path)
@@ -401,5 +408,6 @@ def update_ticket():
         }), 200
 
 # ---------------- Run the Flask App ---------------- #
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
