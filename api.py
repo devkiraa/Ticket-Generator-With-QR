@@ -35,6 +35,9 @@ if not os.path.exists(OUTPUT_FOLDER):
 # CSV file for persisting ticket keys (to avoid duplicates)
 KEY_FILE = "ticket_keys.csv"
 
+# CSV file for attendance records
+ATTENDANCE_FILE = "attendance.csv"
+
 # ---------------- Utility Functions ---------------- #
 
 def generate_unique_ticket_number(existing_keys):
@@ -63,7 +66,6 @@ def save_ticket_key_with_details(key_file, ticket_number, ticket_details):
     with open(key_file, mode="a", newline="") as file:
         writer = csv.writer(file)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # Save the ticket_details as a JSON string
         details_json = json.dumps(ticket_details)
         writer.writerow([ticket_number, timestamp, details_json, "False"])
 
@@ -101,18 +103,14 @@ def update_ticket_record(key_file, ticket_number, additional_data=None):
     for record in records:
         if record["ticket_number"] == ticket_number:
             if record["verified"]:
-                # Already verified, no update
                 updated_record = record
                 break
-            # Mark as verified
             record["verified"] = True
-            # Merge additional_data into ticket_details if provided
             if additional_data and isinstance(additional_data, dict):
                 record["ticket_details"].update(additional_data)
             updated_record = record
             break
 
-    # Write back all records to the CSV
     with open(key_file, mode="w", newline="") as file:
         writer = csv.writer(file)
         for rec in records:
@@ -123,6 +121,20 @@ def update_ticket_record(key_file, ticket_number, additional_data=None):
                 "True" if rec["verified"] else "False"
             ])
     return updated_record
+
+def record_attendance(record):
+    """
+    Append attendance information to the attendance CSV.
+    Columns: ticket_number, verification timestamp, ticket details (as JSON).
+    """
+    current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(ATTENDANCE_FILE, "a", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            record["ticket_number"],
+            current_timestamp,
+            json.dumps(record["ticket_details"])
+        ])
 
 def download_template_image(url):
     """Download an image from a given URL and return a PIL Image object."""
@@ -146,32 +158,23 @@ def send_email_with_attachment(subject, recipient, body, attachment_path, sender
     """
     try:
         message = MIMEMultipart()
-        # Construct the From header with sender name and email address.
         message['From'] = f"{sender_name} <{email_user}>"
         message['To'] = recipient
         message['Subject'] = subject
-
-        # Attach body (plain text or HTML)
         message.attach(MIMEText(body, email_format))
-
-        # Open the file to be sent
         with open(attachment_path, "rb") as attachment:
             mime_base = MIMEBase('application', 'octet-stream')
             mime_base.set_payload(attachment.read())
             encoders.encode_base64(mime_base)
             mime_base.add_header('Content-Disposition', f'attachment; filename={os.path.basename(attachment_path)}')
             message.attach(mime_base)
-
-        # Connect and send email
         with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
             server.login(email_user, email_password)
             server.send_message(message)
-
         status = f"Email sent to {recipient} with attachment {attachment_path}"
         print(status)
         return status
-
     except Exception as e:
         error_msg = f"Failed to send email to {recipient}: {e}"
         print(error_msg)
@@ -180,34 +183,22 @@ def send_email_with_attachment(subject, recipient, body, attachment_path, sender
 def generate_ticket_qr(template_image, image_size=None, qr_config=None, ticket_details=None, existing_keys=None):
     """
     Generate a ticket with a QR code overlaid.
-
     Parameters:
-    - template_image: A PIL Image object (loaded template image).
-    - image_size: dict with "width" and "height" to optionally resize template image.
-    - qr_config: dict with keys:
-         "size": int (size of QR code in pixels),
-         "offset": dict with "x" and "y" (offset from bottom-right),
-         "rotation": int (degrees to rotate the QR code).
-    - ticket_details: dict with all details to be added to the QR data.
-    - existing_keys: set of already generated ticket keys to ensure uniqueness.
+      - template_image: A PIL Image object.
+      - image_size: dict with "width" and "height" to optionally resize the template.
+      - qr_config: dict with keys "size", "offset", "rotation".
+      - ticket_details: dict with details to add to the QR code.
+      - existing_keys: set of already generated ticket keys.
     """
     if existing_keys is None:
         existing_keys = set()
-
-    # Optionally resize the template image
     if image_size and "width" in image_size and "height" in image_size:
         template_image = template_image.resize((image_size["width"], image_size["height"]))
-
-    # Generate a unique ticket number and add it to ticket_details
     ticket_number = generate_unique_ticket_number(existing_keys)
     if ticket_details is None:
         ticket_details = {}
     ticket_details["ticket_number"] = ticket_number
-
-    # Build a multi-line string for QR code data using uppercase keys
     qr_data_str = "\n".join(f"{key.upper()}: {value}" for key, value in ticket_details.items())
-
-    # Set default QR config if not provided
     default_qr_config = {"size": 150, "offset": {"x": 50, "y": 120}, "rotation": 0}
     if qr_config:
         default_qr_config.update(qr_config)
@@ -215,8 +206,6 @@ def generate_ticket_qr(template_image, image_size=None, qr_config=None, ticket_d
     offset_x = default_qr_config["offset"].get("x", 50)
     offset_y = default_qr_config["offset"].get("y", 120)
     rotation = default_qr_config.get("rotation", 0)
-
-    # Generate the QR code image
     qr = qrcode.QRCode(
         version=1,
         error_correction=ERROR_CORRECT_L,
@@ -227,40 +216,26 @@ def generate_ticket_qr(template_image, image_size=None, qr_config=None, ticket_d
     qr.make(fit=True)
     qr_image = qr.make_image(fill_color="black", back_color="white").convert('RGB')
     qr_image = qr_image.resize((qr_size, qr_size))
-    
-    # Optionally rotate the QR image if needed
     if rotation:
         qr_image = qr_image.rotate(rotation, expand=1)
-
-    # Determine QR placement position (placing at bottom-right with specified offset)
     position = (
         template_image.width - qr_image.width - offset_x,
         template_image.height - qr_image.height - offset_y
     )
-    
-    # Paste the QR code onto the template image
     template_image.paste(qr_image, position)
-    
-    # Build the ticket file name and save the image
     event_name = ticket_details.get("event", "EVENT")
     roll_no = ticket_details.get("roll_no", "UNKNOWN")
     ticket_filename = f"{event_name}_{roll_no}_{ticket_number}.png"
     output_path = os.path.join(OUTPUT_FOLDER, ticket_filename)
     template_image.save(output_path)
-    
-    # Save the ticket key with all details for future reference and uniqueness tracking
     save_ticket_key_with_details(KEY_FILE, ticket_number, ticket_details)
-    
-    # Also return the ticket details as a dict with lowercase keys for API response.
     qr_data_dict = {key.lower(): value for key, value in ticket_details.items()}
-    
     return ticket_number, output_path, qr_data_dict
 
 # ---------------- Flask API Application ---------------- #
 
 app = Flask(__name__)
 
-# Serve generated ticket images via an endpoint.
 @app.route('/generated/<filename>')
 def serve_generated_ticket(filename):
     return send_from_directory(OUTPUT_FOLDER, filename)
@@ -275,11 +250,7 @@ def generate_ticket():
       "use_image_url": true,
       "template_image_url": "https://example.com/template.jpg",
       "image_size": {"width": 1240, "height": 480},
-      "qr_config": {
-        "size": 150,
-        "offset": {"x": 1000, "y": 190},
-        "rotation": 0
-      },
+      "qr_config": {"size": 150, "offset": {"x": 1000, "y": 190}, "rotation": 0},
       "ticket_details": {
          "name": "John Doe",
          "roll_no": "12345",
@@ -298,14 +269,9 @@ def generate_ticket():
     }
     """
     data = request.get_json()
-
-    # Only email is now required at the top level.
     if "email" not in data or not data["email"].strip():
         return jsonify({"error": "Missing required field: email"}), 400
-
     email = data["email"].strip()
-
-    # Determine which template image to use
     use_image_url = data.get("use_image_url", False)
     template_image = None
     if use_image_url:
@@ -321,17 +287,10 @@ def generate_ticket():
         if not os.path.exists(template_path):
             return jsonify({"error": f"Template image not found at {template_path}"}), 400
         template_image = Image.open(template_path)
-
-    image_size = data.get("image_size")  # Optional dictionary with width and height
-    qr_config = data.get("qr_config")    # Optional dict for QR code configuration
-
-    # Get ticket_details from the request payload.
+    image_size = data.get("image_size")
+    qr_config = data.get("qr_config")
     ticket_details = data.get("ticket_details", {})
-
-    # Load existing ticket keys to avoid duplicates
     existing_keys = load_ticket_keys_set(KEY_FILE)
-
-    # Generate ticket with QR code overlay and obtain the updated ticket details as a dict.
     ticket_number, output_path, qr_data_dict = generate_ticket_qr(
         template_image,
         image_size=image_size,
@@ -339,14 +298,10 @@ def generate_ticket():
         ticket_details=ticket_details,
         existing_keys=existing_keys
     )
-
-    # Retrieve mail credentials from the request payload (if provided)
     mail_credentials = data.get("mail_credentials", {})
     email_user_cred = mail_credentials.get("email_user", DEFAULT_EMAIL_USER)
     email_password = mail_credentials.get("email_password", DEFAULT_EMAIL_PASSWORD)
-    sender_name = mail_credentials.get("sender_name", "Admin")  # New sender name field
-
-    # Optionally send the ticket via email if requested and credentials are available
+    sender_name = mail_credentials.get("sender_name", "Admin")
     email_status = "Not sent"
     if data.get("send_email", False) and email_user_cred and email_password:
         email_subject = data.get("email_subject")
@@ -364,10 +319,7 @@ def generate_ticket():
             email_user=email_user_cred,
             email_password=email_password
         )
-
-    # Construct a URL for the generated ticket (assuming the API is hosted appropriately)
     ticket_url = url_for('serve_generated_ticket', filename=os.path.basename(output_path), _external=True)
-
     response = {
         "email": email,
         "email_status": email_status,
@@ -377,18 +329,25 @@ def generate_ticket():
     }
     return jsonify(response), 200
 
-# ---------------- New Ticket Verification and Update Endpoints ---------------- #
+# ---------------- Updated Ticket Verification and Update Endpoints ---------------- #
 
-@app.route('/verify_ticket', methods=['GET'])
-def verify_ticket():
+@app.route('/verify_ticket', methods=['POST'])
+def verify_ticket_endpoint():
     """
-    GET endpoint to verify a ticket.
-    Expects a query parameter: ticket_number.
-    Returns ticket details if the ticket is found and not yet verified.
+    POST endpoint to verify a ticket.
+    Expects a JSON payload:
+    {
+        "ticket_number": "TICKET123"
+    }
+    If the ticket is found and not yet verified, it is marked as verified, records attendance, and returns:
+       "Ticket is verified."
+    If already verified, returns:
+       "Ticket already verified."
     """
-    ticket_number = request.args.get("ticket_number", "").strip()
+    data = request.get_json()
+    ticket_number = data.get("ticket_number", "").strip()
     if not ticket_number:
-        return jsonify({"error": "Missing ticket_number parameter"}), 400
+        return jsonify({"error": "Missing ticket_number field"}), 400
 
     records = load_all_ticket_keys(KEY_FILE)
     for record in records:
@@ -396,32 +355,33 @@ def verify_ticket():
             if record["verified"]:
                 return jsonify({
                     "valid": False,
-                    "message": "Ticket has already been verified.",
+                    "message": "Ticket already verified.",
                     "ticket_details": record["ticket_details"]
                 }), 200
             else:
+                updated_record = update_ticket_record(KEY_FILE, ticket_number)
+                # Record attendance: write the ticket details along with current time to attendance CSV.
+                record_attendance(updated_record)
                 return jsonify({
                     "valid": True,
-                    "message": "Ticket is valid.",
-                    "ticket_details": record["ticket_details"]
+                    "message": "Ticket is verified.",
+                    "ticket_details": updated_record["ticket_details"]
                 }), 200
-
     return jsonify({"valid": False, "message": "Ticket not found."}), 404
 
 @app.route('/update_ticket', methods=['POST'])
 def update_ticket():
     """
     POST endpoint to update a ticket for marking attendance.
-    Expects a JSON payload with at least:
+    Expects a JSON payload with:
     {
       "ticket_number": "TICKET123",
-      // Optionally, additional fields to update in ticket_details:
       "attendance_data": {
           "attended_at": "2024-01-01 10:00:00",
           "remarks": "Checked in at gate A"
       }
     }
-    It marks the ticket as verified (used).
+    Marks the ticket as verified and updates its details.
     """
     data = request.get_json()
     ticket_number = data.get("ticket_number", "").strip()
@@ -429,12 +389,10 @@ def update_ticket():
         return jsonify({"error": "Missing required field: ticket_number"}), 400
 
     attendance_data = data.get("attendance_data", {})
-
     updated_record = update_ticket_record(KEY_FILE, ticket_number, additional_data=attendance_data)
     if updated_record is None:
         return jsonify({"error": "Ticket not found."}), 404
     elif not updated_record["verified"]:
-        # Should not occur because update_ticket_record marks it as verified if found.
         return jsonify({"error": "Failed to update the ticket."}), 500
     else:
         return jsonify({
@@ -444,5 +402,4 @@ def update_ticket():
 
 # ---------------- Run the Flask App ---------------- #
 if __name__ == "__main__":
-    # For production, consider using a WSGI server like Gunicorn.
     app.run(host="0.0.0.0", port=5000, debug=True)
