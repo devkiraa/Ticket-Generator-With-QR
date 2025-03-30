@@ -407,6 +407,19 @@ def update_ticket():
             "ticket_details": updated_record["ticket_details"]
         }), 200
 
+# ---------------- Server Status Endpoint ---------------- #
+
+@app.route('/status', methods=['GET'])
+def server_status():
+    """
+    GET endpoint to check server status.
+    Returns a JSON with a message and the current timestamp.
+    """
+    return jsonify({
+        "status": "Server is running.",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }), 200
+
 # ---------------- Run the Flask App ---------------- #
 
 if __name__ == "__main__":
