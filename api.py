@@ -11,7 +11,6 @@ import qrcode
 from qrcode.constants import ERROR_CORRECT_L
 from dotenv import load_dotenv
 import smtplib
-from flask import jsonify
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -19,6 +18,7 @@ from email import encoders
 from pymongo import MongoClient, ReturnDocument
 import logging
 import psutil
+import platform
 
 # Load environment variables
 load_dotenv()
@@ -51,13 +51,16 @@ DEFAULT_EMAIL_USER = os.getenv("EMAIL_USER")
 DEFAULT_EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
 # ---------------- Directories Configuration ---------------- #
-OUTPUT_FOLDER = "Qr_Generated"
+OUTPUT_FOLDER = "QR_GENERATED"
 if not os.path.exists(OUTPUT_FOLDER):
     os.makedirs(OUTPUT_FOLDER)
 
 TEMPLATES_FOLDER = "templates"
 if not os.path.exists(TEMPLATES_FOLDER):
     os.makedirs(TEMPLATES_FOLDER)
+
+# ---------------- Global Variables ---------------- #
+SERVER_START_TIME = datetime.now()
 
 # ---------------- Database Utility Functions ---------------- #
 
@@ -376,12 +379,35 @@ def update_ticket():
 def server_status():
     """
     GET /status
-    Returns a JSON object with server status and the current timestamp.
+    Returns the server status along with uptime and system metrics
+    in a format consistent with other API endpoints.
     """
-    return jsonify({
-        "status": "Server is running.",
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }), 200
+    uptime = datetime.now() - SERVER_START_TIME
+    uptime_str = str(uptime).split('.')[0]  # Format as HH:MM:SS
+
+    # Get system metrics
+    cpu_usage = psutil.cpu_percent(interval=0.1)
+    memory_info = psutil.virtual_memory()
+
+    data = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "uptime": uptime_str,
+        "system_metrics": {
+            "cpu_usage_percent": cpu_usage,
+            "memory": {
+                "total_gb": round(memory_info.total / (1024 ** 3), 2),
+                "used_gb": round(memory_info.used / (1024 ** 3), 2),
+                "usage_percent": memory_info.percent
+            }
+        }
+    }
+
+    response = {
+        "valid": True,
+        "message": "Server is running",
+        "data": data
+    }
+    return jsonify(response), 200
 
 # ---------------- Production Server Startup ---------------- #
 if __name__ == "__main__":
