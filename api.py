@@ -19,8 +19,10 @@ from pymongo import MongoClient, ReturnDocument
 import logging
 import psutil
 import platform
+from queue import Queue
+import threading
 
-# Load environment variables
+# ---------------- Load Environment Variables ---------------- #
 load_dotenv()
 
 # ---------------- Logging Configuration ---------------- #
@@ -61,6 +63,37 @@ if not os.path.exists(TEMPLATES_FOLDER):
 
 # ---------------- Global Variables ---------------- #
 SERVER_START_TIME = datetime.now()
+
+# ---------------- Queue Mechanism ---------------- #
+job_queue = Queue()
+
+def job_worker():
+    """Continuously process queued jobs."""
+    while True:
+        job, args, kwargs, result_queue = job_queue.get()
+        try:
+            result = job(*args, **kwargs)
+            result_queue.put(result)
+        except Exception as e:
+            result_queue.put(e)
+        finally:
+            job_queue.task_done()
+
+# Start a daemon thread to process the job queue.
+worker_thread = threading.Thread(target=job_worker, daemon=True)
+worker_thread.start()
+
+def enqueue_job(job, *args, **kwargs):
+    """
+    Enqueue a job and wait for its result.
+    If an exception occurs in the job, it will be raised.
+    """
+    result_queue = Queue()
+    job_queue.put((job, args, kwargs, result_queue))
+    result = result_queue.get()
+    if isinstance(result, Exception):
+        raise result
+    return result
 
 # ---------------- Database Utility Functions ---------------- #
 
@@ -211,59 +244,40 @@ def generate_ticket_qr(template_image, image_size=None, qr_config=None, ticket_d
 # ---------------- Flask API Endpoints ---------------- #
 
 app = Flask(__name__)
+# Configure SERVER_NAME and preferred URL scheme for url_for to work outside a request context.
+app.config["SERVER_NAME"] = os.getenv("SERVER_NAME", "0.0.0.0:3030")
+app.config["PREFERRED_URL_SCHEME"] = "http"
 
 @app.route('/generated/<filename>')
 def serve_generated_ticket(filename):
     return send_from_directory(OUTPUT_FOLDER, filename)
 
-@app.route('/generate_ticket', methods=['POST'])
-def generate_ticket_endpoint():
+# ----- Processing Functions (to be queued) -----
+
+def process_generate_ticket(data):
     """
-    POST /generate_ticket
-    Expected JSON payload example (using a local template):
-    {
-      "email": "user@example.com",
-      "use_image_url": false,
-      "template_image_path": "sample_template.jpg",
-      "image_size": {"width": 1240, "height": 480},
-      "qr_config": {"size": 150, "offset": {"x": 1000, "y": 190}, "rotation": 0},
-      "ticket_details": {
-         "name": "John Doe",
-         "roll_no": "12345",
-         "event": "SampleEvent",
-         "extra": "Additional info if needed"
-      },
-      "mail_credentials": {
-         "email_user": "sender@example.com",
-         "email_password": "password",
-         "sender_name": "Admin"
-      },
-      "send_email": true,
-      "email_subject": "Your Ticket for SampleEvent",
-      "email_body": "<p>Dear John Doe,<br>Please find your ticket attached.</p>",
-      "email_format": "html"
-    }
+    Process ticket generation. This function contains the same logic as before,
+    and returns a tuple (response_dict, http_status_code).
     """
-    data = request.get_json()
     if "email" not in data or not data["email"].strip():
-        return jsonify({"error": "Missing required field: email"}), 400
+        return {"error": "Missing required field: email"}, 400
     email = data["email"].strip()
 
     use_image_url = data.get("use_image_url", False)
     template_image = None
     if use_image_url:
         if "template_image_url" not in data or not data["template_image_url"]:
-            return jsonify({"error": "template_image_url must be provided when use_image_url is true"}), 400
+            return {"error": "template_image_url must be provided when use_image_url is true"}, 400
         template_image = download_template_image(data["template_image_url"])
         if template_image is None:
-            return jsonify({"error": "Failed to download template image from URL"}), 400
+            return {"error": "Failed to download template image from URL"}, 400
     else:
         if "template_image_path" not in data or not data["template_image_path"]:
-            return jsonify({"error": "template_image_path must be provided when use_image_url is false"}), 400
+            return {"error": "template_image_path must be provided when use_image_url is false"}, 400
         template_filename = data["template_image_path"]
         template_path = os.path.join(TEMPLATES_FOLDER, template_filename)
         if not os.path.exists(template_path):
-            return jsonify({"error": f"Template image not found at {template_path}"}), 400
+            return {"error": f"Template image not found at {template_path}"}, 400
         template_image = Image.open(template_path)
 
     image_size = data.get("image_size")
@@ -298,7 +312,9 @@ def generate_ticket_endpoint():
             email_user=email_user_cred,
             email_password=email_password
         )
-    ticket_url = url_for('serve_generated_ticket', filename=os.path.basename(output_path), _external=True)
+    # Wrap the url_for call in the application context
+    with app.app_context():
+        ticket_url = url_for('serve_generated_ticket', filename=os.path.basename(output_path), _external=True)
     response = {
         "email": email,
         "email_status": email_status,
@@ -306,74 +322,73 @@ def generate_ticket_endpoint():
         "ticket_url": ticket_url,
         "qr_data": qr_data
     }
-    return jsonify(response), 200
+    return response, 200
 
-@app.route('/verify_ticket', methods=['POST'])
-def verify_ticket_endpoint():
+def process_verify_ticket(data):
     """
-    POST /verify_ticket
-    Expects a JSON payload:
-    {
-        "ticket_number": "TICKET123"
-    }
-    If the ticket is found and not yet verified, it is marked as verified and returns:
-       "Ticket is verified."
-    If already verified, returns:
-       "Ticket already verified."
+    Process ticket verification.
     """
-    data = request.get_json()
     ticket_number = data.get("ticket_number", "").strip()
     if not ticket_number:
-        return jsonify({"error": "Missing ticket_number field"}), 400
+        return {"error": "Missing ticket_number field"}, 400
 
     ticket = load_ticket_by_number(ticket_number)
     if not ticket:
-        return jsonify({"valid": False, "message": "Ticket not found."}), 404
+        return {"valid": False, "message": "Ticket not found."}, 404
 
     if ticket.get("verified", False):
-        return jsonify({
+        return {
             "valid": False,
             "message": "Ticket already verified.",
             "ticket_details": ticket["ticket_details"]
-        }), 200
+        }, 200
     else:
         updated_ticket = update_ticket_in_db(ticket_number)
-        return jsonify({
+        return {
             "valid": True,
             "message": "Ticket is verified.",
             "ticket_details": updated_ticket["ticket_details"]
-        }), 200
+        }, 200
 
-@app.route('/update_ticket', methods=['POST'])
-def update_ticket():
+def process_update_ticket(data):
     """
-    POST /update_ticket
-    Expects a JSON payload:
-    {
-      "ticket_number": "TICKET123",
-      "attendance_data": {
-          "attended_at": "2024-01-01 10:00:00",
-          "remarks": "Checked in at gate A"
-      }
-    }
-    Updates the ticket details (merging additional attendance_data).
+    Process ticket update.
     """
-    data = request.get_json()
     ticket_number = data.get("ticket_number", "").strip()
     if not ticket_number:
-        return jsonify({"error": "Missing required field: ticket_number"}), 400
+        return {"error": "Missing required field: ticket_number"}, 400
 
     attendance_data = data.get("attendance_data", {})
     updated_ticket = update_ticket_in_db(ticket_number, additional_data=attendance_data)
     if not updated_ticket:
-        return jsonify({"error": "Ticket not found."}), 404
+        return {"error": "Ticket not found."}, 404
     elif not updated_ticket.get("verified", False):
-        return jsonify({"error": "Failed to update the ticket."}), 500
+        return {"error": "Failed to update the ticket."}, 500
     else:
-        return jsonify({
+        return {
             "message": "Ticket has been updated and marked as verified.",
             "ticket_details": updated_ticket["ticket_details"]
-        }), 200
+        }, 200
+
+# ----- Endpoints Using the Queue Mechanism -----
+
+@app.route('/generate_ticket', methods=['POST'])
+def generate_ticket_endpoint():
+    data = request.get_json()
+    response, status_code = enqueue_job(process_generate_ticket, data)
+    return jsonify(response), status_code
+
+@app.route('/verify_ticket', methods=['POST'])
+def verify_ticket_endpoint():
+    data = request.get_json()
+    response, status_code = enqueue_job(process_verify_ticket, data)
+    return jsonify(response), status_code
+
+@app.route('/update_ticket', methods=['POST'])
+def update_ticket():
+    data = request.get_json()
+    response, status_code = enqueue_job(process_update_ticket, data)
+    return jsonify(response), status_code
 
 @app.route('/status', methods=['GET'])
 def server_status():
@@ -406,6 +421,84 @@ def server_status():
         "valid": True,
         "message": "Server is running",
         "data": data
+    }
+    return jsonify(response), 200
+
+@app.route('/delete_all_images', methods=['POST'])
+def delete_all_images():
+    """
+    Delete all image files in the QR_GENERATED folder.
+    Returns a JSON response with the number of files deleted.
+    """
+    deleted_count = 0
+    try:
+        for filename in os.listdir(OUTPUT_FOLDER):
+            file_path = os.path.join(OUTPUT_FOLDER, filename)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+                deleted_count += 1
+        response = {
+            "message": f"Deleted {deleted_count} files from {OUTPUT_FOLDER}."
+        }
+        return jsonify(response), 200
+    except Exception as e:
+        logger.error(f"Error deleting images: {e}")
+        return jsonify({"error": "Failed to delete images.", "details": str(e)}), 500
+
+@app.route('/ticket_count', methods=['GET'])
+def ticket_count():
+    """
+    Count the number of ticket images in the QR_GENERATED folder.
+    Returns a JSON response with the file count.
+    """
+    try:
+        count = sum(1 for filename in os.listdir(OUTPUT_FOLDER)
+                    if os.path.isfile(os.path.join(OUTPUT_FOLDER, filename)))
+        response = {
+            "ticket_count": count,
+            "message": f"There are {count} ticket images in {OUTPUT_FOLDER}."
+        }
+        return jsonify(response), 200
+    except Exception as e:
+        logger.error(f"Error counting ticket images: {e}")
+        return jsonify({"error": "Failed to count ticket images.", "details": str(e)}), 500
+
+@app.route('/tickets', methods=['GET'])
+def list_tickets():
+    """
+    GET /tickets
+    Returns a paginated list of all tickets stored in the database.
+    Query parameters:
+      - page (int): Page number (default: 1)
+      - per_page (int): Number of tickets per page (default: 10)
+    """
+    try:
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 10))
+    except ValueError:
+        return jsonify({"error": "Invalid pagination parameters"}), 400
+
+    skip = (page - 1) * per_page
+    tickets_cursor = collection.find().skip(skip).limit(per_page)
+    tickets = []
+    for ticket in tickets_cursor:
+        # Convert MongoDB's ObjectId and datetime objects to string
+        ticket['_id'] = str(ticket['_id'])
+        if 'timestamp' in ticket and isinstance(ticket['timestamp'], datetime):
+            ticket['timestamp'] = ticket['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+        if ticket.get('attendance_date_time') and isinstance(ticket['attendance_date_time'], datetime):
+            ticket['attendance_date_time'] = ticket['attendance_date_time'].strftime("%Y-%m-%d %H:%M:%S")
+        tickets.append(ticket)
+
+    total_tickets = collection.count_documents({})
+    total_pages = (total_tickets + per_page - 1) // per_page
+
+    response = {
+        "page": page,
+        "per_page": per_page,
+        "total_tickets": total_tickets,
+        "total_pages": total_pages,
+        "tickets": tickets
     }
     return jsonify(response), 200
 
