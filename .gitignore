@@ -2,3 +2,4 @@ service_account.json
 .env
 Qr_generated/*
 ticket_keys.csv
+templates/*
