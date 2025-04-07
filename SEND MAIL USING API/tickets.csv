@@ -1,0 +1,3 @@
+name,rollNo,batch,year,mobile,email,event,template_image_path,amount
+John Doe,U3CDS22042,DS,B.Tech,9876543210,john.doe@example.com,SQUID GAME 2025,SQUID GAME 2025.png,100
+Jane Smith,U3CDS22043,DS,B.Tech,9876543211,jane.smith@example.com,HUNGER GAMES 2025,HUNGER GAMES 2025.png,150

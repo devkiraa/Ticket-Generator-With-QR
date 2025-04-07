@@ -2,6 +2,7 @@ import os
 import random
 import string
 import json
+import time
 import requests
 from datetime import datetime
 from io import BytesIO
@@ -19,8 +20,8 @@ from pymongo import MongoClient, ReturnDocument
 import logging
 import psutil
 import platform
-from queue import Queue
 import threading
+from bson import ObjectId  # For converting job _id when querying status
 
 # ---------------- Load Environment Variables ---------------- #
 load_dotenv()
@@ -38,6 +39,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client["savishkaara-aio"]
 collection = db["event_registration"]
+job_queue_collection = db["job_queue"]  # New collection for jobs
 
 # Log database connection status
 try:
@@ -63,37 +65,6 @@ if not os.path.exists(TEMPLATES_FOLDER):
 
 # ---------------- Global Variables ---------------- #
 SERVER_START_TIME = datetime.now()
-
-# ---------------- Queue Mechanism ---------------- #
-job_queue = Queue()
-
-def job_worker():
-    """Continuously process queued jobs."""
-    while True:
-        job, args, kwargs, result_queue = job_queue.get()
-        try:
-            result = job(*args, **kwargs)
-            result_queue.put(result)
-        except Exception as e:
-            result_queue.put(e)
-        finally:
-            job_queue.task_done()
-
-# Start a daemon thread to process the job queue.
-worker_thread = threading.Thread(target=job_worker, daemon=True)
-worker_thread.start()
-
-def enqueue_job(job, *args, **kwargs):
-    """
-    Enqueue a job and wait for its result.
-    If an exception occurs in the job, it will be raised.
-    """
-    result_queue = Queue()
-    job_queue.put((job, args, kwargs, result_queue))
-    result = result_queue.get()
-    if isinstance(result, Exception):
-        raise result
-    return result
 
 # ---------------- Database Utility Functions ---------------- #
 
@@ -252,12 +223,11 @@ app.config["PREFERRED_URL_SCHEME"] = "http"
 def serve_generated_ticket(filename):
     return send_from_directory(OUTPUT_FOLDER, filename)
 
-# ----- Processing Functions (to be queued) -----
+# ----- Processing Functions -----
 
 def process_generate_ticket(data):
     """
-    Process ticket generation. This function contains the same logic as before,
-    and returns a tuple (response_dict, http_status_code).
+    Process ticket generation. Returns a tuple (response_dict, http_status_code).
     """
     if "email" not in data or not data["email"].strip():
         return {"error": "Missing required field: email"}, 400
@@ -370,32 +340,128 @@ def process_update_ticket(data):
             "ticket_details": updated_ticket["ticket_details"]
         }, 200
 
-# ----- Endpoints Using the Queue Mechanism -----
+# ----- New Job Queue Functions -----
+
+def add_job(job_type, data):
+    """
+    Save the job request in the job_queue collection and return the job ID.
+    """
+    job = {
+        "job_type": job_type,
+        "data": data,
+        "status": "queued",
+        "created_at": datetime.now(),
+        "updated_at": datetime.now(),
+        "result": None
+    }
+    inserted = job_queue_collection.insert_one(job)
+    return str(inserted.inserted_id)
+
+def job_processor():
+    """
+    Background thread that continuously polls the job_queue collection for queued jobs,
+    processes them, updates the job status, and enforces a delay if email sending was involved.
+    """
+    while True:
+        # Fetch one job with status 'queued', ordered by created_at
+        job = job_queue_collection.find_one_and_update(
+            {"status": "queued"},
+            {"$set": {"status": "processing", "updated_at": datetime.now()}},
+            sort=[("created_at", 1)]
+        )
+        if job is None:
+            time.sleep(1)
+            continue
+
+        job_type = job["job_type"]
+        data = job["data"]
+        result = None
+        status_code = 200
+        try:
+            if job_type == "generate_ticket":
+                result, status_code = process_generate_ticket(data)
+            elif job_type == "verify_ticket":
+                result, status_code = process_verify_ticket(data)
+            elif job_type == "update_ticket":
+                result, status_code = process_update_ticket(data)
+            else:
+                result = {"error": f"Unknown job type: {job_type}"}
+                status_code = 400
+        except Exception as e:
+            result = {"error": str(e)}
+            status_code = 500
+
+        # Update the job document with the result and status
+        new_status = "completed" if status_code == 200 else "error"
+        job_queue_collection.update_one(
+            {"_id": job["_id"]},
+            {"$set": {"status": new_status, "result": result, "updated_at": datetime.now()}}
+        )
+
+        # If the job was a ticket generation with email sending, add a delay
+        if job_type == "generate_ticket" and data.get("send_email", False):
+            # Check if the email_status indicates that an email was sent successfully
+            if isinstance(result, dict) and "email_status" in result and "sent" in result["email_status"].lower():
+                delay = random.uniform(30, 45)
+                logger.info(f"Email sent; waiting for {delay:.2f} seconds before processing the next job.")
+                time.sleep(delay)
+
+# Start the job processor thread as a daemon
+job_processor_thread = threading.Thread(target=job_processor, daemon=True)
+job_processor_thread.start()
+
+# ----- Endpoints that Add Jobs to the Queue -----
 
 @app.route('/generate_ticket', methods=['POST'])
 def generate_ticket_endpoint():
     data = request.get_json()
-    response, status_code = enqueue_job(process_generate_ticket, data)
-    return jsonify(response), status_code
+    job_id = add_job("generate_ticket", data)
+    response = {"message": "Job queued successfully", "job_id": job_id}
+    return jsonify(response), 200
 
 @app.route('/verify_ticket', methods=['POST'])
 def verify_ticket_endpoint():
     data = request.get_json()
-    response, status_code = enqueue_job(process_verify_ticket, data)
-    return jsonify(response), status_code
+    job_id = add_job("verify_ticket", data)
+    response = {"message": "Job queued successfully", "job_id": job_id}
+    return jsonify(response), 200
 
 @app.route('/update_ticket', methods=['POST'])
 def update_ticket():
     data = request.get_json()
-    response, status_code = enqueue_job(process_update_ticket, data)
-    return jsonify(response), status_code
+    job_id = add_job("update_ticket", data)
+    response = {"message": "Job queued successfully", "job_id": job_id}
+    return jsonify(response), 200
+
+@app.route('/job_status', methods=['GET'])
+def job_status():
+    """
+    GET /job_status?job_id=<job_id>
+    Returns the current status and result of a queued job.
+    """
+    job_id = request.args.get("job_id")
+    if not job_id:
+        return jsonify({"error": "Missing job_id parameter"}), 400
+    try:
+        job = job_queue_collection.find_one({"_id": ObjectId(job_id)})
+    except Exception:
+        return jsonify({"error": "Invalid job_id"}), 400
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    # Convert ObjectId and datetime fields to strings for JSON serialization
+    job["_id"] = str(job["_id"])
+    if "created_at" in job:
+        job["created_at"] = job["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+    if job.get("updated_at"):
+        job["updated_at"] = job["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+    return jsonify(job), 200
 
 @app.route('/status', methods=['GET'])
 def server_status():
     """
     GET /status
-    Returns the server status along with uptime and system metrics
-    in a format consistent with other API endpoints.
+    Returns the server status along with uptime and system metrics.
     """
     uptime = datetime.now() - SERVER_START_TIME
     uptime_str = str(uptime).split('.')[0]  # Format as HH:MM:SS
@@ -482,7 +548,7 @@ def list_tickets():
     tickets_cursor = collection.find().skip(skip).limit(per_page)
     tickets = []
     for ticket in tickets_cursor:
-        # Convert MongoDB's ObjectId and datetime objects to string
+        # Convert MongoDB's ObjectId and datetime objects to strings
         ticket['_id'] = str(ticket['_id'])
         if 'timestamp' in ticket and isinstance(ticket['timestamp'], datetime):
             ticket['timestamp'] = ticket['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
@@ -514,7 +580,7 @@ if __name__ == "__main__":
     print(banner)
     logger.info("Starting Event Registration API...")
 
-    # Check MongoDB connection status (already logged on connection above)
+    # Check MongoDB connection status (already logged above)
     try:
         db.command("ping")
         logger.info("MongoDB connection: SUCCESS")
